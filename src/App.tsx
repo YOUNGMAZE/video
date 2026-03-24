@@ -1,40 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type VisualStyle = "neon-bars" | "orbital-wave" | "pulse-ring";
+type VisualStyle = "mini-spectrum" | "mini-scope" | "mini-stereo" | "mini-dual";
 
 const STYLE_OPTIONS: { value: VisualStyle; label: string }[] = [
-  { value: "neon-bars", label: "Neon Bars" },
-  { value: "orbital-wave", label: "Orbital Wave" },
-  { value: "pulse-ring", label: "Pulse Ring" },
+  { value: "mini-spectrum", label: "MiniMeters Spectrum" },
+  { value: "mini-scope", label: "MiniMeters Oscilloscope" },
+  { value: "mini-stereo", label: "MiniMeters Stereo Field" },
+  { value: "mini-dual", label: "MiniMeters Dual Bars" },
 ];
 
 const CANVAS_WIDTH = 1920;
 const CANVAS_HEIGHT = 1080;
 
+const alphaHex = (alpha: number) => Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, "0");
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
   const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const masterAnalyserRef = useRef<AnalyserNode | null>(null);
+  const splitterRef = useRef<ChannelSplitterNode | null>(null);
+  const leftAnalyserRef = useRef<AnalyserNode | null>(null);
+  const rightAnalyserRef = useRef<AnalyserNode | null>(null);
+
   const animationRef = useRef<number | null>(null);
   const objectUrlRef = useRef<string | null>(null);
 
-  const [audioSrc, setAudioSrc] = useState<string>("");
-  const [trackName, setTrackName] = useState<string>("Выберите трек");
+  const [audioSrc, setAudioSrc] = useState("");
+  const [trackName, setTrackName] = useState("Выберите трек");
   const [isVisualizerReady, setIsVisualizerReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [style, setStyle] = useState<VisualStyle>("neon-bars");
-  const [accentColor, setAccentColor] = useState("#8b5cf6");
-  const [sensitivity, setSensitivity] = useState(1.1);
-  const [smoothing, setSmoothing] = useState(0.82);
+  const [style, setStyle] = useState<VisualStyle>("mini-spectrum");
+  const [accentColor, setAccentColor] = useState("#7c3aed");
+  const [sensitivity, setSensitivity] = useState(1);
+  const [smoothing, setSmoothing] = useState(0.83);
   const [hideUi, setHideUi] = useState(false);
 
   const helperText = useMemo(() => {
-    if (!audioSrc) return "Загрузи MP3/WAV, нажми play и визуализация оживет в реальном времени.";
+    if (!audioSrc) return "Загрузи MP3/WAV и выбери стиль визуализации в духе MiniMeters.";
     if (!isVisualizerReady) return "Нажми play на плеере, чтобы браузер разрешил аудио-анализ.";
-    return "Нажми Fullscreen перед записью экрана для чистого 16:9 кадра.";
+    return "Для записи на YouTube включи Fullscreen и кнопку Чистый кадр.";
   }, [audioSrc, isVisualizerReady]);
 
   const setupAudioGraph = async () => {
@@ -47,31 +55,50 @@ export default function App() {
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContextClass();
     }
+    const ctx = audioContextRef.current;
 
     if (!sourceRef.current) {
-      sourceRef.current = audioContextRef.current.createMediaElementSource(audio);
+      sourceRef.current = ctx.createMediaElementSource(audio);
     }
 
-    if (!analyserRef.current) {
-      const analyser = audioContextRef.current.createAnalyser();
-      analyser.fftSize = 2048;
+    if (!masterAnalyserRef.current) {
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 4096;
       analyser.smoothingTimeConstant = smoothing;
       sourceRef.current.connect(analyser);
-      analyser.connect(audioContextRef.current.destination);
-      analyserRef.current = analyser;
+      analyser.connect(ctx.destination);
+      masterAnalyserRef.current = analyser;
     }
 
-    if (audioContextRef.current.state === "suspended") {
-      await audioContextRef.current.resume();
+    if (!splitterRef.current) {
+      splitterRef.current = ctx.createChannelSplitter(2);
+      sourceRef.current.connect(splitterRef.current);
+    }
+
+    if (!leftAnalyserRef.current || !rightAnalyserRef.current) {
+      const left = ctx.createAnalyser();
+      const right = ctx.createAnalyser();
+      left.fftSize = 2048;
+      right.fftSize = 2048;
+      left.smoothingTimeConstant = smoothing;
+      right.smoothingTimeConstant = smoothing;
+      splitterRef.current.connect(left, 0);
+      splitterRef.current.connect(right, 1);
+      leftAnalyserRef.current = left;
+      rightAnalyserRef.current = right;
+    }
+
+    if (ctx.state === "suspended") {
+      await ctx.resume();
     }
 
     setIsVisualizerReady(true);
   };
 
   useEffect(() => {
-    if (analyserRef.current) {
-      analyserRef.current.smoothingTimeConstant = smoothing;
-    }
+    if (masterAnalyserRef.current) masterAnalyserRef.current.smoothingTimeConstant = smoothing;
+    if (leftAnalyserRef.current) leftAnalyserRef.current.smoothingTimeConstant = smoothing;
+    if (rightAnalyserRef.current) rightAnalyserRef.current.smoothingTimeConstant = smoothing;
   }, [smoothing]);
 
   useEffect(() => {
@@ -80,133 +107,213 @@ export default function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const analyser = analyserRef.current;
-    if (!analyser) {
+    const masterAnalyser = masterAnalyserRef.current;
+    if (!masterAnalyser) {
       ctx.fillStyle = "#020617";
       ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
       return;
     }
 
-    const frequencyData = new Uint8Array(analyser.frequencyBinCount);
-    const waveformData = new Uint8Array(analyser.fftSize);
+    const leftAnalyser = leftAnalyserRef.current ?? masterAnalyser;
+    const rightAnalyser = rightAnalyserRef.current ?? masterAnalyser;
 
-    const drawNeonBars = () => {
-      analyser.getByteFrequencyData(frequencyData);
-      const centerX = CANVAS_WIDTH / 2;
-      const centerY = CANVAS_HEIGHT / 2;
-      const radius = 180;
-      const bars = 190;
-      const step = Math.floor(frequencyData.length / bars);
+    const frequencyData = new Uint8Array(masterAnalyser.frequencyBinCount);
+    const waveformData = new Uint8Array(masterAnalyser.fftSize);
+    const leftWaveData = new Uint8Array(leftAnalyser.fftSize);
+    const rightWaveData = new Uint8Array(rightAnalyser.fftSize);
+    const leftFreqData = new Uint8Array(leftAnalyser.frequencyBinCount);
+    const rightFreqData = new Uint8Array(rightAnalyser.frequencyBinCount);
 
-      for (let i = 0; i < bars; i += 1) {
-        const value = frequencyData[i * step] / 255;
-        const boosted = Math.pow(value, 1.25) * 220 * sensitivity;
-        const angle = (Math.PI * 2 * i) / bars;
-        const startX = centerX + Math.cos(angle) * radius;
-        const startY = centerY + Math.sin(angle) * radius;
-        const endX = centerX + Math.cos(angle) * (radius + boosted);
-        const endY = centerY + Math.sin(angle) * (radius + boosted);
+    const spectrumPeak = new Float32Array(88);
+    const leftPeak = { current: 0 };
+    const rightPeak = { current: 0 };
 
-        ctx.strokeStyle = accentColor;
-        ctx.lineWidth = 2.5;
-        ctx.shadowBlur = 22;
-        ctx.shadowColor = accentColor;
+    const drawBackdrop = (time: number) => {
+      const bg = ctx.createLinearGradient(0, 0, 0, CANVAS_HEIGHT);
+      bg.addColorStop(0, "#020617");
+      bg.addColorStop(1, "#050b1a");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      ctx.strokeStyle = `#ffffff1a`;
+      ctx.lineWidth = 1;
+      const rows = 20;
+      for (let i = 0; i <= rows; i += 1) {
+        const y = (CANVAS_HEIGHT / rows) * i;
         ctx.beginPath();
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(endX, endY);
+        ctx.moveTo(0, y);
+        ctx.lineTo(CANVAS_WIDTH, y);
         ctx.stroke();
       }
+
+      const scanline = ((time * 0.09) % (CANVAS_HEIGHT + 260)) - 130;
+      const scanGradient = ctx.createLinearGradient(0, scanline - 100, 0, scanline + 100);
+      scanGradient.addColorStop(0, "transparent");
+      scanGradient.addColorStop(0.5, `${accentColor}${alphaHex(0.18)}`);
+      scanGradient.addColorStop(1, "transparent");
+      ctx.fillStyle = scanGradient;
+      ctx.fillRect(0, scanline - 100, CANVAS_WIDTH, 200);
     };
 
-    const drawOrbitalWave = () => {
-      analyser.getByteTimeDomainData(waveformData);
+    const drawMiniSpectrum = () => {
+      masterAnalyser.getByteFrequencyData(frequencyData);
+
+      const bars = spectrumPeak.length;
+      const chartTop = 150;
+      const chartBottom = CANVAS_HEIGHT - 190;
+      const chartHeight = chartBottom - chartTop;
+      const stepX = CANVAS_WIDTH / bars;
+      const segHeight = 12;
+      const segGap = 4;
+      const sampleStep = Math.max(1, Math.floor(frequencyData.length / bars));
+
+      for (let i = 0; i < bars; i += 1) {
+        const value = Math.pow(frequencyData[i * sampleStep] / 255, 1.15) * sensitivity;
+        const clamped = Math.min(value, 1.1);
+        const activeHeight = clamped * chartHeight;
+        const x = i * stepX + stepX * 0.16;
+        const width = stepX * 0.68;
+
+        spectrumPeak[i] = Math.max(clamped, spectrumPeak[i] - 0.012);
+        const peakY = chartBottom - spectrumPeak[i] * chartHeight;
+
+        const segments = Math.floor(activeHeight / (segHeight + segGap));
+        for (let j = 0; j < segments; j += 1) {
+          const y = chartBottom - (j + 1) * (segHeight + segGap);
+          const alpha = 0.35 + (j / Math.max(1, segments)) * 0.65;
+          ctx.fillStyle = `${accentColor}${alphaHex(alpha)}`;
+          ctx.fillRect(x, y, width, segHeight);
+        }
+
+        ctx.fillStyle = `${accentColor}${alphaHex(0.95)}`;
+        ctx.fillRect(x, peakY, width, 5);
+      }
+    };
+
+    const drawMiniScope = () => {
+      masterAnalyser.getByteTimeDomainData(waveformData);
+
       const centerY = CANVAS_HEIGHT / 2;
-      const baseAmplitude = 220 * sensitivity;
+      const amp = 290 * sensitivity;
 
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = accentColor;
-      ctx.shadowBlur = 18;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff29";
+      ctx.beginPath();
+      ctx.moveTo(0, centerY);
+      ctx.lineTo(CANVAS_WIDTH, centerY);
+      ctx.stroke();
+
+      ctx.lineWidth = 4;
+      ctx.shadowBlur = 26;
       ctx.shadowColor = accentColor;
-
+      ctx.strokeStyle = accentColor;
       ctx.beginPath();
+
       for (let x = 0; x < CANVAS_WIDTH; x += 1) {
-        const index = Math.floor((x / CANVAS_WIDTH) * waveformData.length);
-        const sample = (waveformData[index] - 128) / 128;
-        const y = centerY + sample * baseAmplitude;
+        const idx = Math.floor((x / CANVAS_WIDTH) * waveformData.length);
+        const sample = (waveformData[idx] - 128) / 128;
+        const y = centerY + sample * amp;
         if (x === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
-      ctx.stroke();
 
-      ctx.beginPath();
-      for (let x = 0; x < CANVAS_WIDTH; x += 1) {
-        const index = Math.floor((x / CANVAS_WIDTH) * waveformData.length);
-        const sample = (waveformData[index] - 128) / 128;
-        const y = centerY - sample * baseAmplitude;
-        if (x === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
       ctx.stroke();
+      ctx.shadowBlur = 0;
     };
 
-    const drawPulseRing = (time: number) => {
-      analyser.getByteFrequencyData(frequencyData);
+    const drawMiniStereoField = () => {
+      leftAnalyser.getByteTimeDomainData(leftWaveData);
+      rightAnalyser.getByteTimeDomainData(rightWaveData);
 
-      let lowEnergy = 0;
-      const lowBand = Math.floor(frequencyData.length * 0.15);
-      for (let i = 0; i < lowBand; i += 1) lowEnergy += frequencyData[i];
-      lowEnergy = lowEnergy / lowBand / 255;
-
-      const pulseRadius = 170 + lowEnergy * 260 * sensitivity;
       const centerX = CANVAS_WIDTH / 2;
       const centerY = CANVAS_HEIGHT / 2;
+      const spread = 360 * sensitivity;
 
-      ctx.lineWidth = 10;
-      ctx.strokeStyle = accentColor;
-      ctx.shadowBlur = 34;
-      ctx.shadowColor = accentColor;
+      ctx.strokeStyle = "#ffffff24";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(centerX, centerY, pulseRadius, 0, Math.PI * 2);
+      ctx.moveTo(centerX, centerY - 290);
+      ctx.lineTo(centerX, centerY + 290);
+      ctx.moveTo(centerX - 290, centerY);
+      ctx.lineTo(centerX + 290, centerY);
       ctx.stroke();
 
-      const particles = 120;
-      for (let i = 0; i < particles; i += 1) {
-        const angle = (Math.PI * 2 * i) / particles + time * 0.00035;
-        const orbit = pulseRadius + 90 + (i % 11) * 7;
-        const px = centerX + Math.cos(angle) * orbit;
-        const py = centerY + Math.sin(angle) * orbit;
-        const alpha = 0.2 + lowEnergy * 0.8;
-
-        ctx.fillStyle = `${accentColor}${Math.round(alpha * 255)
-          .toString(16)
-          .padStart(2, "0")}`;
-        ctx.beginPath();
-        ctx.arc(px, py, 2 + lowEnergy * 5, 0, Math.PI * 2);
-        ctx.fill();
+      ctx.fillStyle = `${accentColor}${alphaHex(0.22)}`;
+      for (let i = 0; i < leftWaveData.length; i += 2) {
+        const l = (leftWaveData[i] - 128) / 128;
+        const r = (rightWaveData[i] - 128) / 128;
+        const x = centerX + (l + r) * spread;
+        const y = centerY + (l - r) * spread;
+        ctx.fillRect(x, y, 2, 2);
       }
+    };
+
+    const drawMiniDualBars = () => {
+      leftAnalyser.getByteFrequencyData(leftFreqData);
+      rightAnalyser.getByteFrequencyData(rightFreqData);
+
+      const meterWidth = CANVAS_WIDTH * 0.78;
+      const meterX = (CANVAS_WIDTH - meterWidth) / 2;
+      const meterHeight = 56;
+      const topY = CANVAS_HEIGHT * 0.38;
+      const bottomY = CANVAS_HEIGHT * 0.55;
+
+      const avgChannel = (data: Uint8Array) => {
+        let sum = 0;
+        const limit = Math.floor(data.length * 0.22);
+        for (let i = 0; i < limit; i += 1) sum += data[i];
+        return (sum / Math.max(1, limit) / 255) * sensitivity;
+      };
+
+      const leftLevel = Math.min(avgChannel(leftFreqData), 1);
+      const rightLevel = Math.min(avgChannel(rightFreqData), 1);
+
+      leftPeak.current = Math.max(leftLevel, leftPeak.current - 0.009);
+      rightPeak.current = Math.max(rightLevel, rightPeak.current - 0.009);
+
+      const drawMeter = (label: string, y: number, level: number, peak: number) => {
+        ctx.fillStyle = "#ffffff18";
+        ctx.fillRect(meterX, y, meterWidth, meterHeight);
+
+        const fillWidth = meterWidth * level;
+        ctx.fillStyle = `${accentColor}${alphaHex(0.88)}`;
+        ctx.fillRect(meterX, y, fillWidth, meterHeight);
+
+        const peakX = meterX + meterWidth * peak;
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillRect(peakX - 2, y - 4, 4, meterHeight + 8);
+
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "600 30px Inter, system-ui, sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(label, meterX - 55, y + meterHeight / 2 + 10);
+      };
+
+      drawMeter("L", topY, leftLevel, leftPeak.current);
+      drawMeter("R", bottomY, rightLevel, rightPeak.current);
+    };
+
+    const drawOverlayLabels = () => {
+      ctx.fillStyle = "rgba(226, 232, 240, 0.85)";
+      ctx.font = "500 22px Inter, system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("BeatFrame x MiniMeters", 70, 64);
+
+      ctx.fillStyle = "rgba(241, 245, 249, 0.92)";
+      ctx.font = "700 52px Inter, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(trackName || "Untitled Track", CANVAS_WIDTH / 2, CANVAS_HEIGHT - 84);
     };
 
     const render = (time: number) => {
-      const bg = ctx.createLinearGradient(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-      bg.addColorStop(0, "#020617");
-      bg.addColorStop(0.6, "#0b1120");
-      bg.addColorStop(1, "#020617");
+      drawBackdrop(time);
 
-      ctx.fillStyle = bg;
-      ctx.globalAlpha = 0.35;
-      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-      ctx.globalAlpha = 1;
+      if (style === "mini-spectrum") drawMiniSpectrum();
+      if (style === "mini-scope") drawMiniScope();
+      if (style === "mini-stereo") drawMiniStereoField();
+      if (style === "mini-dual") drawMiniDualBars();
 
-      if (style === "neon-bars") drawNeonBars();
-      if (style === "orbital-wave") drawOrbitalWave();
-      if (style === "pulse-ring") drawPulseRing(time);
-
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = "rgba(255,255,255,0.88)";
-      ctx.font = "600 56px Inter, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(trackName || "Untitled Track", CANVAS_WIDTH / 2, CANVAS_HEIGHT - 90);
-
+      drawOverlayLabels();
       animationRef.current = requestAnimationFrame(render);
     };
 
@@ -241,10 +348,6 @@ export default function App() {
     setIsPlaying(false);
   };
 
-  const handleToggleUi = () => {
-    setHideUi((prev) => !prev);
-  };
-
   const handleFullscreen = async () => {
     if (!stageRef.current) return;
 
@@ -266,16 +369,16 @@ export default function App() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950 text-white">
-      <div className="bg-shift pointer-events-none absolute inset-0 opacity-60" />
+      <div className="bg-shift pointer-events-none absolute inset-0 opacity-55" />
 
-      <main className="relative mx-auto flex w-full max-w-[1300px] flex-col gap-6 px-4 py-5 sm:px-6 md:py-8">
-        <header className={`space-y-3 transition-all duration-500 ${hideUi ? "opacity-0 -translate-y-6" : "opacity-100"}`}>
-          <p className="text-sm uppercase tracking-[0.24em] text-violet-300/80">BeatFrame Studio</p>
-          <h1 className="text-3xl font-semibold leading-tight sm:text-5xl">Загрузи трек и получи визуал, который можно сразу выложить на YouTube</h1>
+      <main className="relative mx-auto flex w-full max-w-[1320px] flex-col gap-6 px-4 py-5 sm:px-6 md:py-8">
+        <header className={`space-y-3 transition-all duration-500 ${hideUi ? "-translate-y-6 opacity-0" : "opacity-100"}`}>
+          <p className="text-sm uppercase tracking-[0.24em] text-violet-300/85">BeatFrame Studio</p>
+          <h1 className="text-3xl font-semibold leading-tight sm:text-5xl">MiniMeters-стиль визуализации для твоего трека</h1>
           <p className="max-w-3xl text-sm text-slate-300 sm:text-base">{helperText}</p>
         </header>
 
-        <section ref={stageRef} className="relative aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-slate-950/70">
+        <section ref={stageRef} className="relative aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-slate-950/80">
           <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} className="h-full w-full" />
         </section>
 
@@ -284,13 +387,13 @@ export default function App() {
             hideUi ? "pointer-events-none translate-y-8 opacity-0" : "translate-y-0 opacity-100"
           }`}
         >
-          <label className="flex items-center justify-center rounded-lg border border-dashed border-violet-300/40 bg-violet-400/10 px-3 py-2 text-sm font-medium text-violet-100 transition hover:border-violet-200/80 hover:bg-violet-300/15">
+          <label className="flex h-10 items-center justify-center rounded-lg border border-dashed border-violet-300/45 bg-violet-400/10 px-3 text-sm font-medium text-violet-100 transition hover:border-violet-200/85 hover:bg-violet-300/15">
             Выбрать аудио (MP3/WAV)
             <input type="file" accept="audio/*" onChange={handleUpload} className="hidden" />
           </label>
 
           <div className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wider text-slate-400">Стиль</span>
+            <span className="text-xs uppercase tracking-wider text-slate-400">Режим</span>
             <select
               value={style}
               onChange={(event) => setStyle(event.target.value as VisualStyle)}
@@ -319,7 +422,7 @@ export default function App() {
             <input
               type="range"
               min={0.5}
-              max={2.2}
+              max={2.1}
               step={0.1}
               value={sensitivity}
               onChange={(event) => setSensitivity(Number(event.target.value))}
@@ -355,7 +458,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={handleToggleUi}
+              onClick={() => setHideUi((prev) => !prev)}
               className="h-10 rounded-lg border border-white/20 px-3 text-sm transition hover:border-violet-300 hover:text-violet-200"
             >
               Чистый кадр
@@ -380,6 +483,16 @@ export default function App() {
             </div>
           </div>
         </section>
+
+        {hideUi ? (
+          <button
+            type="button"
+            onClick={() => setHideUi(false)}
+            className="absolute right-6 top-6 z-20 h-10 rounded-lg border border-white/30 bg-black/40 px-3 text-sm text-slate-100 backdrop-blur transition hover:border-violet-300 hover:text-violet-100"
+          >
+            Показать UI
+          </button>
+        ) : null}
       </main>
     </div>
   );
